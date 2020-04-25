@@ -63,11 +63,11 @@ class QCNN(nn.Module):
         self.seed = random.seed(seed)
 
         # Convolution 1
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=9, stride=1, padding=0)
         self.maxpool1 = nn.MaxPool2d(kernel_size=2)
 
         # Convolution 1
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=0)
         self.maxpool2 = nn.MaxPool2d(kernel_size=2)
 
         # Convolution 1
@@ -75,7 +75,7 @@ class QCNN(nn.Module):
         self.maxpool3 = nn.MaxPool2d(kernel_size=2)
 
         # Fully connected
-        self.fc1 = nn.Linear(64 * 12 * 12, 128)
+        self.fc1 = nn.Linear(64 * 10 * 10, 128)
         self.fc2 = nn.Linear(128, 5)
 
     def forward(self, frame):
@@ -90,12 +90,12 @@ class QCNN(nn.Module):
 
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
-        return torch.sigmoid(self.fc2(x))
+        return self.fc2(x)
 
 
 class Agent:
 
-    def __init__(self, name, env, target_score, seed=0):
+    def __init__(self, name, env, target_score, used_saved=False, seed=0):
         self.name = name
         self.seed = random.seed(seed)
         self.time_step = 0
@@ -115,7 +115,7 @@ class Agent:
         self.epsilon = self.epsilon_range[0]
 
         # Memory buffer
-        self.memory_size = int(5e6)
+        self.memory_size = int(1e5)
         self.batch_size = 64
         self.memory = Memory(self.memory_size, seed=seed)
 
@@ -135,11 +135,13 @@ class Agent:
         self.trained_duration_from_load = 0
         self.episodes_trained = 0
 
-    def _initialize_new_agent(self):
-        pass
+        if used_saved:
+            self._load_saved_agent()
 
     def _load_saved_agent(self):
-        pass
+        self._load_state()
+        self._load_memory()
+        self._load_network()
 
     def act(self, state, epsilon=0.0):
         state = torch.from_numpy(np.flip(state, axis=0).copy()).float().unsqueeze(0).permute([0, 3, 1, 2]).to(device)
@@ -265,13 +267,15 @@ class Agent:
         torch.save(self.primary_network.state_dict(), self.data_location + "primary_network.m")
         torch.save(self.target_network.state_dict(), self.data_location + "target_network.m")
 
-    # TODO: implement
     def _load_memory(self):
         pass
+        # with open(self.data_location + "memory.pickle", 'rb') as handle:
+        #     self.memory.memory = pickle.load(handle)
 
     def _save_memory(self):
-        with open(self.data_location + "memory.pickle", 'wb') as handle:
-            pickle.dump(self.memory.memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pass
+        # with open(self.data_location + "memory.pickle", 'wb') as handle:
+        #     pickle.dump(self.memory.memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _load_state(self):
         with open(self.data_location+"state.pickle", 'rb') as handle:
@@ -344,7 +348,7 @@ class Agent:
             while not done:
                 action = self.act(state)
                 self.env.render()
-                state, reward, done, _ = self.env.step(action)
+                state, reward, done, _ = self.env.step(self.get_action(action))
 
 
 if __name__ == '__main__':
@@ -352,7 +356,6 @@ if __name__ == '__main__':
 
     env = gym.make("CarRacing-v0", verbose=0)
     env.seed(0)
-    env.verbose = 0
 
     agent = Agent("CarRacing-64-1e-3", env, target_score=900.0)
 
