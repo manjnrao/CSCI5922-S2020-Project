@@ -63,23 +63,31 @@ class QCNN(nn.Module):
         self.seed = random.seed(seed)
 
         # Convolution 1
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=9, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=9, stride=1, padding=0)
         self.maxpool1 = nn.MaxPool2d(kernel_size=2)
 
-        # Convolution 1
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=0)
+        # Convolution 2
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5, stride=1, padding=0)
         self.maxpool2 = nn.MaxPool2d(kernel_size=2)
 
-        # Convolution 1
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
+        # Convolution 3
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
         self.maxpool3 = nn.MaxPool2d(kernel_size=2)
 
         # Fully connected
-        self.fc1 = nn.Linear(64 * 10 * 10, 128)
-        self.fc2 = nn.Linear(128, 5)
+        self.fc_panel = nn.Linear(12 * 96 * 3, 64)
+        self.fc_conv = nn.Linear(128 * 8 * 10, 128)
+
+        # Output
+        self.fc_combine = nn.Linear(192, 32)
+        self.fc_output = nn.Linear(32, 5)
 
     def forward(self, frame):
-        x = F.relu(self.conv1(frame))
+
+        x = frame[:, :, 0:84, :]
+        y = frame[:, :, 84:96, :]
+
+        x = F.relu(self.conv1(x))
         x = self.maxpool1(x)
 
         x = F.relu(self.conv2(x))
@@ -89,8 +97,14 @@ class QCNN(nn.Module):
         x = self.maxpool3(x)
 
         x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+        x = F.relu(self.fc_conv(x))
+
+        y = torch.flatten(y, 1)
+        y = F.relu(self.fc_panel(y))
+
+        x = torch.cat([x, y], dim=1)
+        x = F.relu(self.fc_combine(x))
+        return self.fc_output(x)
 
 
 class Agent:
@@ -357,7 +371,7 @@ if __name__ == '__main__':
     env = gym.make("CarRacing-v0", verbose=0)
     env.seed(0)
 
-    agent = Agent("CarRacing-64-1e-3", env, target_score=900.0)
+    agent = Agent("CarRacing-panel-arc", env, target_score=900.0)
 
     agent.learn_env(5000)
     agent.display_scores()
