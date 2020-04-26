@@ -9,10 +9,22 @@ import torch.nn.functional as F
 import torch.optim as optim
 import time
 import pickle
+from skimage import color, transform
 
+class LazyFrames(object):
+    def __init__(self, frames):
+        """This object ensures that common frames between the observations are only stored once.
+        It exists purely to optimize memory usage which can be huge for DQN's 1M frames replay
+        buffers.
+        This object should only be converted to numpy array before being passed to the model.
+        You'd not belive how complex the previous solution was."""
+        self._frames = frames
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
+    def __array__(self, dtype=None):
+        out = np.concatenate(self._frames, axis=2)
+        if dtype is not None:
+            out = out.astype(dtype)
+        return out
 
 class Memory:
 
@@ -22,23 +34,30 @@ class Memory:
 
     def add(self, state, action, reward, next_state, done):
         self.memory.append(tuple([
-            np.expand_dims(np.moveaxis(state, [0, 1, 2], [2, 1, 0]), axis=0),
+            # np.expand_dims(np.moveaxis(state, [0, 1, 2], [2, 1, 0]), axis=0),
+            # Store the lazy state object
+            state,
             action,
             reward,
-            np.expand_dims(np.moveaxis(next_state, [0, 1, 2], [2, 1, 0]), axis=0),
+            # np.expand_dims(np.moveaxis(next_state, [0, 1, 2], [2, 1, 0]), axis=0),
+            next_state,
             done]))
 
     def sample(self, batch_size):
         experiences = random.sample(self.memory, k=batch_size)
 
+        # states = torch.from_numpy(np.vstack(
+        #     [e[0] for e in experiences if e is not None])).float().to(device)
         states = torch.from_numpy(np.vstack(
-            [e[0] for e in experiences if e is not None])).float().to(device)
+            [np.expand_dims(np.moveaxis(np.asarray(e[0]), [0, 1, 2], [2, 1, 0]), axis=0) for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(np.vstack(
             [e[1] for e in experiences if e is not None])).long().to(device)
         rewards = torch.from_numpy(np.vstack(
             [e[2] for e in experiences if e is not None])).float().to(device)
+        # next_states = torch.from_numpy(np.vstack(
+        #     [e[3] for e in experiences if e is not None])).float().to(device)
         next_states = torch.from_numpy(np.vstack(
-            [e[3] for e in experiences if e is not None])).float().to(device)
+            [np.expand_dims(np.moveaxis(np.asarray(e[3]), [0, 1, 2], [2, 1, 0]), axis=0) for e in experiences if e is not None])).float().to(device)
         dones = torch.from_numpy(np.vstack(
             [e[4] for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
 
@@ -46,7 +65,6 @@ class Memory:
 
     def __len__(self):
         return len(self.memory)
-
 
 actions = {
     0: tuple([0, 0, 0]),  # DO NOTHING
@@ -56,27 +74,22 @@ actions = {
     4: tuple([-1, 0, 0])  # LEFT
 }
 
-
 class QCNN(nn.Module):
     def __init__(self, seed=0):
         super(QCNN, self).__init__()
         self.seed = random.seed(seed)
 
         # Convolution 1
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=9, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(in_channels=4, out_channels=8, kernel_size=8, stride=1, padding=0)
         self.maxpool1 = nn.MaxPool2d(kernel_size=2)
 
-        # Convolution 1
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=0)
+        # Convolution 2
+        self.conv2 = nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, stride=1, padding=0)
         self.maxpool2 = nn.MaxPool2d(kernel_size=2)
 
-        # Convolution 1
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.maxpool3 = nn.MaxPool2d(kernel_size=2)
-
         # Fully connected
-        self.fc1 = nn.Linear(64 * 10 * 10, 128)
-        self.fc2 = nn.Linear(128, 5)
+        self.fc1 = nn.Linear(21*21*16, 256)
+        self.fc2 = nn.Linear(256, 5)
 
     def forward(self, frame):
         x = F.relu(self.conv1(frame))
@@ -85,17 +98,13 @@ class QCNN(nn.Module):
         x = F.relu(self.conv2(x))
         x = self.maxpool2(x)
 
-        x = F.relu(self.conv3(x))
-        x = self.maxpool3(x)
-
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-
 class Agent:
 
-    def __init__(self, name, env, target_score, used_saved=False, seed=0):
+    def __init__(self, name, env, target_score, seed=0):
         self.name = name
         self.seed = random.seed(seed)
         self.time_step = 0
@@ -108,7 +117,7 @@ class Agent:
         self.target_score = target_score
 
         # RL parameters
-        self.discount_factor = 0.99
+        self.discount_factor = 0.95
         self.epsilon_range = [1.0, 0.01]
         self.epsilon_decay = 0.995
         self.update_every_n_steps = 10
@@ -135,16 +144,18 @@ class Agent:
         self.trained_duration_from_load = 0
         self.episodes_trained = 0
 
-        if used_saved:
-            self._load_saved_agent()
+        # Stacked frames
+        self.stack_size = 4
+        self.stacked_states = deque([], maxlen=self.stack_size)
+
+    def _initialize_new_agent(self):
+        pass
 
     def _load_saved_agent(self):
-        self._load_state()
-        self._load_memory()
-        self._load_network()
+        pass
 
     def act(self, state, epsilon=0.0):
-        state = torch.from_numpy(state.copy()).float().unsqueeze(0).permute([0, 3, 1, 2]).to(device)
+        state = torch.from_numpy(np.asarray(state).copy()).float().unsqueeze(0).permute([0, 3, 2, 1]).to(device)
 
         # Eval mode and without auto-grad to save time
         self.primary_network.eval()
@@ -171,7 +182,7 @@ class Agent:
             if len(self.memory) > self.batch_size:
                 experiences = self.memory.sample(self.batch_size)
                 self._train_q_network(experiences)
-                self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)  # decrease epsilon
+                self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)
 
     def _train_q_network(self, experiences):
         states, actions, rewards, next_states, dones = experiences
@@ -203,10 +214,12 @@ class Agent:
 
         for i_episode in range(training_start_index, max_episodes+1):
             state = self.env.reset()
+            state = self.preprocess(state, first=True)
             score = 0
             for t in range(max_timesteps_per_episode):
                 action = self.act(state, self.epsilon)
                 next_state, reward, done, _ = self.env.step(self.get_action(action))
+                next_state = self.preprocess(next_state)
                 self._step(state, action, reward, next_state, done)
                 state = next_state
                 score += reward
@@ -214,6 +227,7 @@ class Agent:
                     break
             self.scores_window.append(score)  # save most recent score
             self.scores.append(score)  # save most recent score
+            #self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)  # decrease epsilon
 
             self._display_progress(i_episode)
 
@@ -267,15 +281,13 @@ class Agent:
         torch.save(self.primary_network.state_dict(), self.data_location + "primary_network.m")
         torch.save(self.target_network.state_dict(), self.data_location + "target_network.m")
 
+    # TODO: implement
     def _load_memory(self):
         pass
-        # with open(self.data_location + "memory.pickle", 'rb') as handle:
-        #     self.memory.memory = pickle.load(handle)
 
     def _save_memory(self):
-        pass
-        # with open(self.data_location + "memory.pickle", 'wb') as handle:
-        #     pickle.dump(self.memory.memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(self.data_location + "memory.pickle", 'wb') as handle:
+            pickle.dump(self.memory.memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _load_state(self):
         with open(self.data_location+"state.pickle", 'rb') as handle:
@@ -344,15 +356,36 @@ class Agent:
     def play(self, n_episodes=5):
         for i in range(n_episodes):
             state = self.env.reset()
+            state = self.preprocess(state, first=True)
             done = False
             while not done:
                 action = self.act(state)
                 self.env.render()
-                state, reward, done, _ = self.env.step(self.get_action(action))
+                state, reward, done, _ = self.env.step(action)
+                state = self.preprocess(state)
 
+
+
+    def preprocess(self, state, first=False):
+      '''
+      Given a 96x96x3 RGB state.
+      First converts it to 96x96x1 grayscale. 
+      Then stacks k last frames.
+      Returns lazy array, which is much more memory efficient.
+      Lazy array has dimensions 96x96xk
+      This object should only be converted to numpy array before being passed to the model.
+      It should not be stored as is in the experience buffer.
+      '''
+      state = 2 * color.rgb2gray(state) - 1.0
+      state = np.expand_dims(state, axis=2)
+      if first:
+        for _ in range(self.stack_size):
+          self.stacked_states.append(state)
+      else:
+        self.stacked_states.append(state)
+      return LazyFrames(list(self.stacked_states))
 
 if __name__ == '__main__':
-    import gym
 
     env = gym.make("CarRacing-v0", verbose=0)
     env.seed(0)
