@@ -111,7 +111,7 @@ class Agent:
         self.discount_factor = 0.99
         self.epsilon_range = [1.0, 0.01]
         self.epsilon_decay = 0.995
-        self.update_every_n_steps = 50
+        self.update_every_n_steps = 10
         self.epsilon = self.epsilon_range[0]
 
         # Memory buffer
@@ -171,6 +171,7 @@ class Agent:
             if len(self.memory) > self.batch_size:
                 experiences = self.memory.sample(self.batch_size)
                 self._train_q_network(experiences)
+                self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)  # decrease epsilon
 
     def _train_q_network(self, experiences):
         states, actions, rewards, next_states, dones = experiences
@@ -213,7 +214,6 @@ class Agent:
                     break
             self.scores_window.append(score)  # save most recent score
             self.scores.append(score)  # save most recent score
-            self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)  # decrease epsilon
 
             self._display_progress(i_episode)
 
