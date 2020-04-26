@@ -144,7 +144,7 @@ class Agent:
         self._load_network()
 
     def act(self, state, epsilon=0.0):
-        state = torch.from_numpy(np.flip(state, axis=0).copy()).float().unsqueeze(0).permute([0, 3, 1, 2]).to(device)
+        state = torch.from_numpy(state.copy()).float().unsqueeze(0).permute([0, 3, 1, 2]).to(device)
 
         # Eval mode and without auto-grad to save time
         self.primary_network.eval()
