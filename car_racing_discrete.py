@@ -2,16 +2,24 @@ import gym
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from collections import namedtuple, deque
+from collections import deque
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import time
 import pickle
-from skimage import color, transform
+from skimage import color
+
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
 class LazyFrames(object):
+    """
+    https://github.com/openai/baselines/blob/master/baselines/common/atari_wrappers.py
+    """
+
     def __init__(self, frames):
         """This object ensures that common frames between the observations are only stored once.
         It exists purely to optimize memory usage which can be huge for DQN's 1M frames replay
@@ -26,36 +34,31 @@ class LazyFrames(object):
             out = out.astype(dtype)
         return out
 
-class Memory:
 
+class Memory:
+    """
+    This class is used for Experience replay.
+    """
     def __init__(self, memory_size, seed=0):
         self.seed = random.seed(seed)
         self.memory = deque(maxlen=memory_size)
 
     def add(self, state, action, reward, next_state, done):
-        self.memory.append(tuple([
-            # np.expand_dims(np.moveaxis(state, [0, 1, 2], [2, 1, 0]), axis=0),
-            # Store the lazy state object
-            state,
-            action,
-            reward,
-            # np.expand_dims(np.moveaxis(next_state, [0, 1, 2], [2, 1, 0]), axis=0),
-            next_state,
-            done]))
+        self.memory.append(tuple([state, action, reward, next_state, done]))
 
     def sample(self, batch_size):
+        """
+        This method returns a list of tensors after sampling a batch from the Experience Replay memory.
+        It loads the tensors on to the computing device: cpu/gpu before returning them.
+        """
         experiences = random.sample(self.memory, k=batch_size)
 
-        # states = torch.from_numpy(np.vstack(
-        #     [e[0] for e in experiences if e is not None])).float().to(device)
         states = torch.from_numpy(np.vstack(
             [np.expand_dims(np.moveaxis(np.asarray(e[0]), [0, 1, 2], [2, 1, 0]), axis=0) for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(np.vstack(
             [e[1] for e in experiences if e is not None])).long().to(device)
         rewards = torch.from_numpy(np.vstack(
             [e[2] for e in experiences if e is not None])).float().to(device)
-        # next_states = torch.from_numpy(np.vstack(
-        #     [e[3] for e in experiences if e is not None])).float().to(device)
         next_states = torch.from_numpy(np.vstack(
             [np.expand_dims(np.moveaxis(np.asarray(e[3]), [0, 1, 2], [2, 1, 0]), axis=0) for e in experiences if e is not None])).float().to(device)
         dones = torch.from_numpy(np.vstack(
@@ -66,15 +69,21 @@ class Memory:
     def __len__(self):
         return len(self.memory)
 
+
+# Discrete-to-continuous action mapping
 actions = {
     0: tuple([0, 0, 0]),  # DO NOTHING
-    1: tuple([0, 1, 0]),  # ACCELERATE
-    2: tuple([0, 0, 1]),  # BRAKE
-    3: tuple([1, 0, 0]),  # RIGHT
-    4: tuple([-1, 0, 0])  # LEFT
+    1: tuple([0, 0.5, 0]),  # ACCELERATE
+    2: tuple([0, 0, 0.5]),  # BRAKE
+    3: tuple([0.5, 0, 0]),  # RIGHT
+    4: tuple([-0.5, 0, 0]),  # LEFT
 }
 
+
 class QCNN(nn.Module):
+    """
+    The Deep Q-Learning Network with CNN.
+    """
     def __init__(self, seed=0):
         super(QCNN, self).__init__()
         self.seed = random.seed(seed)
@@ -102,9 +111,13 @@ class QCNN(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-class Agent:
 
-    def __init__(self, name, env, target_score, seed=0):
+class Agent:
+    """
+    Agent for solving the CarRacing-v0 environment
+    """
+
+    def __init__(self, name, env, target_score, use_saved=False, seed=0):
         self.name = name
         self.seed = random.seed(seed)
         self.time_step = 0
@@ -148,13 +161,20 @@ class Agent:
         self.stack_size = 4
         self.stacked_states = deque([], maxlen=self.stack_size)
 
-    def _initialize_new_agent(self):
-        pass
+        # Load trained agent to continue training or to play the environment
+        if use_saved:
+            self._load_saved_agent()
 
     def _load_saved_agent(self):
-        pass
+        self._load_state()
+        self._load_memory()
+        self._load_network()
 
     def act(self, state, epsilon=0.0):
+        """
+        Computes the best action for the given state using the Q-Network,
+        and returns an action using epsilon-greedy policy.
+        """
         state = torch.from_numpy(np.asarray(state).copy()).float().unsqueeze(0).permute([0, 3, 2, 1]).to(device)
 
         # Eval mode and without auto-grad to save time
@@ -174,6 +194,13 @@ class Agent:
         return actions[action]
 
     def _step(self, state, action, reward, next_state, done):
+        """
+        The agent steps forward in time.
+        This function mirrors the step function of the gym environment.
+
+        It adds the current experience into the replay buffer,
+          and trains the agent using a random sample from the memory.
+        """
         self.time_step += 1
         self.memory.add(state, action, reward, next_state, done)
 
@@ -204,11 +231,24 @@ class Agent:
         self._soft_update()
 
     def _soft_update(self):
+        """
+        The soft update for Double Deep Q-Learning that updates the target network using the update parameter TAU.
+        """
         for target_param, local_param in zip(self.target_network.parameters(), self.primary_network.parameters()):
             target_param.data.copy_(
                 self.soft_update_tau * local_param.data + (1.0 - self.soft_update_tau) * target_param.data)
 
     def learn_env(self, max_episodes, max_timesteps_per_episode=1500):
+        """
+        This function starts the agent's training on the environment.
+
+        It displays progress and intermittently saves the training state so that it can be recovered if
+           the program shut down unexpectedly.
+
+        :param max_episodes: Maximum episodes to train for.
+        :param max_timesteps_per_episode: Maximum timesteps to train on one episode.
+        :return:
+        """
         self.training_start_time = time.time()
         training_start_index = self.episodes_trained + 1
 
@@ -227,7 +267,6 @@ class Agent:
                     break
             self.scores_window.append(score)  # save most recent score
             self.scores.append(score)  # save most recent score
-            #self.epsilon = max(self.epsilon_range[1], self.epsilon_decay * self.epsilon)  # decrease epsilon
 
             self._display_progress(i_episode)
 
@@ -281,13 +320,13 @@ class Agent:
         torch.save(self.primary_network.state_dict(), self.data_location + "primary_network.m")
         torch.save(self.target_network.state_dict(), self.data_location + "target_network.m")
 
-    # TODO: implement
+    # Not implemented because the memory buffer quickly becomes too large ( > 8GB)
     def _load_memory(self):
         pass
 
+    # Not implemented because the memory buffer quickly becomes too large ( > 8GB)
     def _save_memory(self):
-        with open(self.data_location + "memory.pickle", 'wb') as handle:
-            pickle.dump(self.memory.memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pass
 
     def _load_state(self):
         with open(self.data_location+"state.pickle", 'rb') as handle:
@@ -354,6 +393,9 @@ class Agent:
         plt.show()
 
     def play(self, n_episodes=5):
+        """
+        Call to see how the agent performs with its current state of training.
+        """
         for i in range(n_episodes):
             state = self.env.reset()
             state = self.preprocess(state, first=True)
@@ -361,36 +403,34 @@ class Agent:
             while not done:
                 action = self.act(state)
                 self.env.render()
-                state, reward, done, _ = self.env.step(action)
+                state, reward, done, _ = self.env.step(self.get_action(action))
                 state = self.preprocess(state)
 
-
-
     def preprocess(self, state, first=False):
-      '''
-      Given a 96x96x3 RGB state.
-      First converts it to 96x96x1 grayscale. 
-      Then stacks k last frames.
-      Returns lazy array, which is much more memory efficient.
-      Lazy array has dimensions 96x96xk
-      This object should only be converted to numpy array before being passed to the model.
-      It should not be stored as is in the experience buffer.
-      '''
-      state = 2 * color.rgb2gray(state) - 1.0
-      state = np.expand_dims(state, axis=2)
-      if first:
-        for _ in range(self.stack_size):
-          self.stacked_states.append(state)
-      else:
-        self.stacked_states.append(state)
-      return LazyFrames(list(self.stacked_states))
+        """
+        Given a 96x96x3 RGB state.
+        First converts it to 96x96x1 grayscale.
+        Then stacks k last frames.
+        Returns lazy array, which is much more memory efficient.
+        Lazy array has dimensions 96x96xk
+        This object should only be converted to numpy array before being passed to the model.
+        It should not be stored as is in the experience buffer.
+        """
+        state = 2 * color.rgb2gray(state) - 1.0
+        state = np.expand_dims(state, axis=2)
+        if first:
+            for _ in range(self.stack_size):
+                self.stacked_states.append(state)
+        else:
+            self.stacked_states.append(state)
+        return LazyFrames(list(self.stacked_states))
+
 
 if __name__ == '__main__':
-
     env = gym.make("CarRacing-v0", verbose=0)
     env.seed(0)
 
-    agent = Agent("CarRacing-64-1e-3", env, target_score=900.0)
+    agent = Agent("CarRacing-FrameStack", env, target_score=900.0)
 
-    agent.learn_env(5000)
+    agent.learn_env(500)
     agent.display_scores()
